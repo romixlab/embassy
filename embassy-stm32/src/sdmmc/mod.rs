@@ -6,6 +6,7 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::task::Poll;
 
+use defmt::export::debug;
 use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::{into_ref, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
@@ -32,6 +33,7 @@ impl<T: Instance> InterruptHandler<T> {
             w.set_dcrcfailie(enable);
             w.set_dtimeoutie(enable);
             w.set_dataendie(enable);
+            w.set_rxoverrie(enable);
 
             #[cfg(sdmmc_v2)]
             w.set_dabortie(enable);
@@ -41,6 +43,7 @@ impl<T: Instance> InterruptHandler<T> {
 
 impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
+        debug!("SDMMC interrupt");
         Self::data_interrupts(false);
         T::state().wake();
     }
@@ -419,6 +422,7 @@ impl<'d, T: Instance> Sdmmc<'d, T, NoDma> {
             d2.set_speed(Speed::VeryHigh);
             d3.set_speed(Speed::VeryHigh);
         });
+        cortex_m::asm::delay(200_000_000u32);
 
         Self::new_inner(
             sdmmc,
@@ -669,6 +673,11 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
             w.set_bypass(_bypass);
         });
 
+        debug!(
+            "ker_ck: {}, set clkdiv = {}, new_clock: {}",
+            ker_ck.0, clkdiv, new_clock.0,
+        );
+
         Ok(())
     }
 
@@ -775,10 +784,11 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
         let transfer = self.prepare_datapath_read(&mut status, 64, 6);
         InterruptHandler::<T>::data_interrupts(true);
         Self::cmd(Cmd::card_status(0), true)?;
-
+        debug!("read_sd_status A");
         let res = poll_fn(|cx| {
             T::state().register(cx.waker());
             let status = regs.star().read();
+            debug!("poll star");
 
             if status.dcrcfail() {
                 return Poll::Ready(Err(Error::Crc));
@@ -786,10 +796,36 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 return Poll::Ready(Err(Error::Timeout));
             } else if status.dataend() {
                 return Poll::Ready(Ok(()));
+            } else if status.rxoverr() {
+                debug!("rxoverr");
+                return Poll::Ready(Err(Error::RxOverFlow));
+            } else if status.dbckend() {
+                debug!("dbckend");
+                return Poll::Ready(Ok(()));
             }
             Poll::Pending
         })
         .await;
+        // let res = loop {
+        //     let status = regs.star().read();
+        //     debug!("poll star");
+
+        //     if status.dcrcfail() {
+        //         break Err(Error::Crc);
+        //     } else if status.dtimeout() {
+        //         break Err(Error::Timeout);
+        //     } else if status.dataend() {
+        //         debug!("ok: dataend");
+        //         break Ok(());
+        //     } else if status.rxoverr() {
+        //         debug!("rxoverr");
+        //         break Err(Error::RxOverFlow);
+        //     } else if status.dbckend() {
+        //         debug!("dbckend");
+        //         break Ok(());
+        //     }
+        // };
+        debug!("read_sd_status B");
         Self::clear_interrupt_flags();
 
         if res.is_ok() {
@@ -837,6 +873,7 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
             w.set_dbckendc(true);
             w.set_sdioitc(true);
 
+            // wasn't done in h7xxhal
             #[cfg(sdmmc_v2)]
             {
                 w.set_dholdc(true);
@@ -1000,6 +1037,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
         // CPSMACT and DPSMACT must be 0 to set WIDBUS
         Self::wait_idle();
 
+        debug!("ker_ck = {} set clkdiv={}", ker_ck.0, clkdiv);
+
         regs.clkcr().modify(|w| {
             w.set_widbus(0);
             w.set_clkdiv(clkdiv);
@@ -1021,6 +1060,7 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
             return Err(Error::UnsupportedCardVersion);
         };
 
+        debug!("sdmmc A");
         let ocr = loop {
             // Signal that next command is a app command
             Self::cmd(Cmd::app_cmd(0), false)?; // CMD55
@@ -1043,6 +1083,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
             }
         };
 
+        debug!("sdmmc B");
+
         if ocr.high_capacity() {
             // Card is SDHC or SDXC or SDUC
             card.card_type = CardCapacity::SDHC;
@@ -1059,6 +1101,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
         let cid = (cid0 << 96) | (cid1 << 64) | (cid2 << 32) | (cid3);
         card.cid = cid.into();
 
+        debug!("sdmmc C");
+
         Self::cmd(Cmd::send_rel_addr(), false)?;
         card.rca = regs.respr(0).read().cardstatus() >> 16;
 
@@ -1070,10 +1114,12 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
         let csd = (csd0 << 96) | (csd1 << 64) | (csd2 << 32) | (csd3);
         card.csd = csd.into();
 
+        debug!("sdmmc D");
         self.select_card(Some(&card))?;
 
         self.get_scr(&mut card).await?;
 
+        debug!("sdmmc E");
         // Set bus width
         let (width, acmd_arg) = match bus_width {
             BusWidth::Eight => unimplemented!(),
@@ -1106,9 +1152,11 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
 
         self.card = Some(card);
 
+        debug!("sdmmc F");
         // Read status
         self.read_sd_status().await?;
 
+        debug!("sdmmc G");
         if freq.0 > 25_000_000 {
             // Switch to SDR25
             self.signalling = self.switch_signalling_mode(Signalling::SDR25).await?;
@@ -1122,6 +1170,7 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
                 }
             }
         }
+        debug!("sdmmc H");
         // Read status after signalling change
         self.read_sd_status().await?;
 
@@ -1446,6 +1495,21 @@ cfg_if::cfg_if! {
                     } else {
                         crate::rcc::get_freqs().pll48.expect("PLL48 is required for SDMMC")
                     }
+                })
+            };
+        }
+    } else if #[cfg(stm32h7)] {
+        macro_rules! kernel_clk {
+            (SDMMC1) => {
+                critical_section::with(|_| unsafe {
+                    debug!("PLL1Q is being used by SDMMC1!");
+                    crate::rcc::get_freqs().pll1_q.expect("PLL1Q must be enabled")
+                })
+            };
+            (SDMMC2) => {
+                critical_section::with(|_| unsafe {
+                    debug!("PLL1Q is being used by SDMMC2!");
+                    crate::rcc::get_freqs().pll1_q.expect("PLL1Q must be enabled")
                 })
             };
         }

@@ -77,6 +77,9 @@ pub struct Clocks {
     #[cfg(rcc_wb)]
     /// Set only if the lsi or lse is configured
     pub rtc: Option<Hertz>,
+
+    #[cfg(any(rcc_h7))]
+    pub pll1_q: Option<Hertz>,
 }
 
 /// Frozen clock frequencies

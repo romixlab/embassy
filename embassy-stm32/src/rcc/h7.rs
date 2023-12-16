@@ -732,6 +732,7 @@ pub(crate) unsafe fn init(mut config: Config) {
         apb1_tim: core_clocks.timx_ker_ck.unwrap_or(core_clocks.pclk1),
         apb2_tim: core_clocks.timy_ker_ck.unwrap_or(core_clocks.pclk2),
         adc: core_clocks.adc_ker_ck,
+        pll1_q: core_clocks.pll1_q_ck,
     });
 }
 
