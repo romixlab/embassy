@@ -581,6 +581,30 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
         });
     }
 
+    /// Applies configuration specific to
+    /// Core ID 0x0000_5000
+    pub fn config_v5(&mut self) {
+        let r = self.instance.regs;
+        let phy_type = self.instance.phy_type;
+
+        // F446-like chips have the GCCFG.VBDEN bit with the opposite meaning
+        // r.gccfg_v2().modify(|w| {
+        //     // Enable internal full-speed PHY, logic is inverted
+        //     w.set_pwrdwn(phy_type.internal() && !phy_type.high_speed());
+        //     w.set_phyhsen(phy_type.internal() && phy_type.high_speed());
+        // });
+
+        r.gccfg_v2().modify(|w| {
+            w.set_vbden(self.config.vbus_detection);
+        });
+
+        // Force B-peripheral session
+        r.gotgctl().modify(|w| {
+            w.set_bvaloen(!self.config.vbus_detection);
+            w.set_bvaloval(true);
+        });
+    }
+
     fn init(&mut self) {
         let r = self.instance.regs;
         let phy_type = self.instance.phy_type;

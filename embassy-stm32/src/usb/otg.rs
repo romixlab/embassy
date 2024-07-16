@@ -147,6 +147,47 @@ impl<'d, T: Instance> Driver<'d, T> {
             phantom: PhantomData,
         }
     }
+
+    /// Initializes USB OTG peripheral with internal High-Speed PHY.
+    ///
+    /// # Arguments
+    ///
+    /// * `ep_out_buffer` - An internal buffer used to temporarily store received packets.
+    /// Must be large enough to fit all OUT endpoint max packet sizes.
+    /// Endpoint allocation will fail if it is too small.
+    pub fn new_hs(
+        _peri: impl Peripheral<P = T> + 'd,
+        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        dp: impl Peripheral<P = impl DpPin<T>> + 'd,
+        dm: impl Peripheral<P = impl DmPin<T>> + 'd,
+        ep_out_buffer: &'d mut [u8],
+        config: Config,
+    ) -> Self {
+        assert!(T::HIGH_SPEED == true, "Peripheral is not capable of high-speed USB");
+
+        into_ref!(dp, dm);
+
+        dp.set_as_af(dp.af_num(), AfType::output(OutputType::PushPull, Speed::VeryHigh));
+        dm.set_as_af(dm.af_num(), AfType::output(OutputType::PushPull, Speed::VeryHigh));
+
+        let regs = T::regs();
+
+        let instance = OtgInstance {
+            regs: T::regs(),
+            state: T::state(),
+            fifo_depth_words: T::FIFO_DEPTH_WORDS,
+            extra_rx_fifo_words: RX_FIFO_EXTRA_SIZE_WORDS,
+            endpoint_count: T::ENDPOINT_COUNT,
+            phy_type: PhyType::InternalHighSpeed,
+            quirk_setup_late_cnak: quirk_setup_late_cnak(regs),
+            calculate_trdt_fn: calculate_trdt::<T>,
+        };
+
+        Self {
+            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl<'d, T: Instance> embassy_usb_driver::Driver<'d> for Driver<'d, T> {
@@ -237,6 +278,7 @@ impl<'d, T: Instance> Bus<'d, T> {
         match core_id {
             0x0000_1200 | 0x0000_1100 => self.inner.config_v1(),
             0x0000_2000 | 0x0000_2100 | 0x0000_2300 | 0x0000_3000 | 0x0000_3100 => self.inner.config_v2v3(),
+            0x0000_5000 => self.inner.config_v5(),
             _ => unimplemented!("Unknown USB core id {:X}", core_id),
         }
     }
