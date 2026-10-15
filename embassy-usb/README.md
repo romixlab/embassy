@@ -1,6 +1,6 @@
 # embassy-usb
 
-Async USB device stack for embedded devices in Rust.
+Async USB device and host stack for embedded devices in Rust.
 
 ## Features
 
@@ -14,6 +14,11 @@ Async USB device stack for embedded devices in Rust.
     - Ethernet (CDC NCM)
     - Human Interface Devices (HID)
     - MIDI
+    - Generic USB Display (GUD)
+    - Mass Storage (MSC)
+
+The [`host`](https://docs.embassy.dev/embassy-usb/git/default/host/index.html) module provides USB host enumeration,
+descriptor parsing, and class drivers for devices including HID, CDC ACM, mass storage, MIDI, and USB Audio Class.
 
 ## Adding support for new hardware
 
@@ -37,11 +42,11 @@ and counts of buffers.
 They can be set in two ways:
 
 - Via Cargo features: enable a feature like `<name>-<value>`. `name` must be in lowercase and
-use dashes instead of underscores. For example. `max-interface-count-3`. Only a selection of values
-is available, check `Cargo.toml` for the list.
+  use dashes instead of underscores. For example. `max-interface-count-3`. Only a selection of values
+  is available, check `Cargo.toml` for the list.
 - Via environment variables at build time: set the variable named `EMBASSY_USB_<value>`. For example
-`EMBASSY_USB_MAX_INTERFACE_COUNT=3 cargo build`. You can also set them in the `[env]` section of `.cargo/config.toml`.
-Any value can be set, unlike with Cargo features.
+  `EMBASSY_USB_MAX_INTERFACE_COUNT=3 cargo build`. You can also set them in the `[env]` section of `.cargo/config.toml`.
+  Any value can be set, unlike with Cargo features.
 
 Environment variables take precedence over Cargo features. If two Cargo features are enabled for the same setting
 with different values, compilation fails.

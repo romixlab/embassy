@@ -1,10 +1,9 @@
 //! Utilities for writing USB descriptors.
 use embassy_usb_driver::EndpointType;
 
-use crate::CONFIGURATION_VALUE;
-use crate::builder::Config;
 use crate::driver::EndpointInfo;
 use crate::types::{InterfaceNumber, StringIndex};
+use crate::{CONFIGURATION_VALUE, Config};
 
 /// Standard descriptor types
 #[allow(missing_docs)]
@@ -16,6 +15,9 @@ pub mod descriptor_type {
     pub const ENDPOINT: u8 = 5;
     pub const DEVICE_QUALIFIER: u8 = 6;
     pub const OTHER_SPEED_CONFIGURATION: u8 = 7;
+    pub const INTERFACE_POWER: u8 = 8;
+    pub const OTG: u8 = 9;
+    pub const DEBUG: u8 = 10;
     pub const IAD: u8 = 11;
     pub const BOS: u8 = 15;
     pub const CAPABILITY: u8 = 16;
@@ -81,6 +83,8 @@ pub(crate) struct DescriptorWriter<'a> {
     num_endpoints_mark: Option<usize>,
 }
 
+pub(crate) struct DescriptorMark(usize);
+
 impl<'a> DescriptorWriter<'a> {
     pub(crate) fn new(buf: &'a mut [u8]) -> Self {
         DescriptorWriter {
@@ -98,6 +102,14 @@ impl<'a> DescriptorWriter<'a> {
     /// Gets the current position in the buffer, i.e. the number of bytes written so far.
     pub const fn position(&self) -> usize {
         self.position
+    }
+
+    pub(crate) const fn mark(&self) -> DescriptorMark {
+        DescriptorMark(self.position)
+    }
+
+    pub(crate) fn patch<R>(&mut self, mark: DescriptorMark, patch: impl FnOnce(&mut [u8]) -> R) -> R {
+        patch(&mut self.buf[mark.0..self.position])
     }
 
     /// Writes an arbitrary (usually class-specific) descriptor with optional extra fields.
@@ -201,7 +213,6 @@ impl<'a> DescriptorWriter<'a> {
     /// * `interface_sub_class` - Sub-class code. Depends on class.
     /// * `interface_protocol` - Protocol code. Depends on class and sub-class.
     /// * `interface_string` - Index of string descriptor describing this interface
-
     pub fn interface_alt(
         &mut self,
         number: InterfaceNumber,
@@ -273,10 +284,10 @@ impl<'a> DescriptorWriter<'a> {
                 assert_eq!(synchronization_type, SynchronizationType::NoSynchronization)
             }
 
-            let synchronization_bm_attibutes: u8 = (synchronization_type as u8) << 2;
-            let usage_bm_attibutes: u8 = (usage_type as u8) << 4;
+            let synchronization_bm_attributes: u8 = (synchronization_type as u8) << 2;
+            let usage_bm_attributes: u8 = (usage_type as u8) << 4;
 
-            bm_attributes |= usage_bm_attibutes | synchronization_bm_attibutes;
+            bm_attributes |= usage_bm_attributes | synchronization_bm_attributes;
         }
 
         self.write(
@@ -361,6 +372,30 @@ pub(crate) fn device_qualifier_descriptor(config: &Config) -> [u8; 10] {
         1,                                  // bNumConfigurations
         0,                                  // Reserved
     ]
+}
+
+pub(crate) fn rewrite_config_descriptor_for_high_speed(buf: &mut [u8]) {
+    let mut pos = 0;
+    while pos < buf.len() {
+        let len = buf[pos] as usize;
+        assert!(len >= 2 && pos + len <= buf.len(), "invalid configuration descriptor");
+
+        if buf[pos + 1] == descriptor_type::ENDPOINT && len >= 7 {
+            let transfer_type = buf[pos + 3] & 0x03;
+            if transfer_type == EndpointType::Interrupt as u8 || transfer_type == EndpointType::Isochronous as u8 {
+                buf[pos + 6] = encode_high_speed_interval(buf[pos + 6]);
+            }
+        }
+
+        pos += len;
+    }
+}
+
+fn encode_high_speed_interval(interval_ms: u8) -> u8 {
+    let microframes = u32::from(interval_ms.max(1)) * 8;
+    let rounded = microframes.next_power_of_two().min(1 << 15);
+    let exponent = (31 - rounded.leading_zeros()) as u8;
+    exponent + 1
 }
 
 /// A writer for Binary Object Store descriptor.

@@ -12,6 +12,7 @@
 #![doc = document_features::document_features!(feature_label = r#"<span class="stab portability"><code>{feature}</code></span>"#)]
 
 // This must go FIRST so that all the other modules see its macros.
+mod wait;
 mod fmt;
 include!(concat!(env!("OUT_DIR"), "/_macros.rs"));
 
