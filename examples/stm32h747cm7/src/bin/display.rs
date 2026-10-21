@@ -60,6 +60,7 @@ async fn main(_spawner: Spawner) {
         source: embassy_stm32::rcc::PllSource::Hse,
         prediv: embassy_stm32::rcc::PllPreDiv::Div5,
         mul: embassy_stm32::rcc::PllMul::Mul192,
+        fracn: None,
         divp: Some(embassy_stm32::rcc::PllDiv::Div2),
         divq: Some(embassy_stm32::rcc::PllDiv::Div8),
         divr: None,
@@ -69,6 +70,7 @@ async fn main(_spawner: Spawner) {
         source: embassy_stm32::rcc::PllSource::Hse,
         prediv: embassy_stm32::rcc::PllPreDiv::Div5,
         mul: embassy_stm32::rcc::PllMul::Mul120,
+        fracn: None,
         divp: Some(embassy_stm32::rcc::PllDiv::Div3),
         divq: Some(embassy_stm32::rcc::PllDiv::Div2),
         divr: Some(embassy_stm32::rcc::PllDiv::Div3), // 200MHz SDRAM clock
@@ -78,6 +80,7 @@ async fn main(_spawner: Spawner) {
         source: embassy_stm32::rcc::PllSource::Hse,
         prediv: embassy_stm32::rcc::PllPreDiv::Div5,
         mul: embassy_stm32::rcc::PllMul::Mul100,
+        fracn: None,
         divp: Some(embassy_stm32::rcc::PllDiv::Div2),
         divq: Some(embassy_stm32::rcc::PllDiv::Div2),
 
