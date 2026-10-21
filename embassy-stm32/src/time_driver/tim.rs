@@ -154,7 +154,9 @@ impl RtcDriver {
         r.cr1().modify(|w| w.set_cen(false));
         write_cnt(0);
 
-        let psc = timer_freq.0 / TICK_HZ as u32 - 1;
+        // to the nearest: a timer clock a few Hz below a multiple of TICK_HZ (a fractional PLL) would otherwise
+        // divide by one less and tick ~0.4 % fast at 260 MHz
+        let psc = (timer_freq.0 + TICK_HZ as u32 / 2) / TICK_HZ as u32 - 1;
         let psc: u16 = match psc.try_into() {
             Err(_) => panic!("psc division overflow: {}", psc),
             Ok(n) => n,
