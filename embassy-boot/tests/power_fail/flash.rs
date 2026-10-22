@@ -11,12 +11,22 @@ use embedded_storage::nor_flash::{ErrorType, NorFlash, NorFlashError, NorFlashEr
 pub enum Rule {
     /// The unit must be erased, except that all zeros can always be programmed. Anything else is refused.
     OnceOrZero,
+    /// As `OnceOrZero`, and all zeros over a unit programmed to all ones is refused too (errata).
+    OnceOrZeroErrata,
+    /// The unit must be erased, or all zeros go over a unit that is not all zero yet: all zeros over all zeros
+    /// is refused ("already fully programmed to 0").
+    ZeroOnce,
+    /// Never refused; a program over a unit that is not erased leaves an inconsistent ECC that faults on every
+    /// read until the next erase, unless it writes the value the unit already holds.
+    EccOverwrite,
     /// Bits only go from 1 to 0, any number of times; a 1 over a 0 silently stays 0.
     BitsToZero,
     /// Erases to 0x00. The unit must be zero; a write to a unit that is not zero is refused.
     NotZeroRefused,
     /// Erases to 0x00. A write over programmed data ORs into it.
     Or,
+    /// Any value over anything, no erase needed (RRAM).
+    Overwrite,
 }
 
 /// A flash family.
@@ -37,6 +47,13 @@ pub trait Model: 'static {
     const RULE: Rule;
     /// A unit left half-programmed or half-erased by a cut faults on read.
     const ECC: bool;
+    /// Physical sector sizes from address 0, the last one repeating; empty: all `ERASE_SIZE`. One `erase` of the
+    /// driver then is several sector erases, each of which a cut can hit.
+    const SECTORS: &'static [usize] = &[];
+    /// Writes of one `WRITE_SIZE` word allowed between erases.
+    const MAX_WRITES: usize = usize::MAX;
+    /// Writes allowed per block of this many bytes between erases: (block, writes); (0, 0) for no limit.
+    const BLOCK_WRITES: (usize, usize) = (0, 0);
 }
 
 /// Error of a [`Nor`].
@@ -111,10 +128,17 @@ pub struct Nor<M> {
     pub dead: bool,
     /// The last error returned, with its address.
     pub last_error: Option<(SimError, usize)>,
-    /// The last program a cut tore: where it started and what it was writing.
-    pub torn: Option<(usize, Vec<u8>)>,
-    /// A family rule was broken (silently, as the chip would): what and where.
-    pub broken: Vec<String>,
+    /// Programs a cut tore, until their sector is erased: where each started and what it was writing.
+    pub torn: Vec<(usize, Vec<u8>)>,
+    /// A family rule was broken (silently, as the chip would): a class and what and where.
+    pub broken: Vec<(&'static str, String)>,
+    /// Per unit: programmed since the last erase (whatever it holds).
+    pub programmed: Vec<bool>,
+    /// Per unit: faults because a program went over it (`EccOverwrite`), not because a cut tore it.
+    pub poisoned: Vec<bool>,
+    /// Writes per `WRITE_SIZE` word and per `BLOCK_WRITES` block since the last erase.
+    writes: Vec<u32>,
+    block_writes: Vec<u32>,
     pub log: Vec<String>,
     /// Leave plain programs and erases out of the log (cuts and refusals are always logged).
     pub quiet: bool,
@@ -135,8 +159,12 @@ impl<M: Model> Nor<M> {
             cut: None,
             dead: false,
             last_error: None,
-            torn: None,
+            torn: Vec::new(),
             broken: Vec::new(),
+            programmed: vec![false; size / M::UNIT],
+            poisoned: vec![false; size / M::UNIT],
+            writes: vec![0; size / M::WRITE_SIZE],
+            block_writes: vec![0; size.checked_div(M::BLOCK_WRITES.0).unwrap_or(0)],
             log: Vec::new(),
             quiet: false,
             regions,
@@ -203,47 +231,146 @@ impl<M: Model> Nor<M> {
         let unit = at / M::UNIT;
         let cur = &self.mem[at..at + M::UNIT];
         let erased = cur.iter().all(|&b| b == M::ERASED) && !self.bad[unit];
+        let zeros = new.iter().all(|&b| b == 0);
+        let cur_zero = cur.iter().all(|&b| b == 0);
+        let cur_ones = cur.iter().all(|&b| b == 0xFF);
+        let same = cur == new;
+        let needs_one = cur.iter().zip(new).any(|(&c, &b)| c & b != b);
         match M::RULE {
-            Rule::OnceOrZero => {
-                if !erased && new.iter().any(|&b| b != 0) {
+            Rule::OnceOrZero | Rule::OnceOrZeroErrata | Rule::ZeroOnce => {
+                let refused = match M::RULE {
+                    Rule::OnceOrZero => !erased && !zeros,
+                    // A unit programmed to all ones reads as erased, but the erratum still refuses zeros over it.
+                    Rule::OnceOrZeroErrata => (!erased && !zeros) || (zeros && self.programmed[unit] && cur_ones),
+                    _ => !erased && !(zeros && !cur_zero),
+                };
+                if refused {
                     return Err(SimError::Refused);
                 }
                 self.mem[at..at + M::UNIT].copy_from_slice(new);
                 self.bad[unit] = false;
             }
-            Rule::BitsToZero => {
+            Rule::EccOverwrite => {
+                if !erased && !same {
+                    let line = format!(
+                        "{}: program over a used unit ({:02X?} <- {new:02X?}), ECC now inconsistent",
+                        self.regions.name(at),
+                        &self.mem[at..at + M::UNIT]
+                    );
+                    self.bad[unit] = true;
+                    self.poisoned[unit] = true;
+                    self.broken.push(("ecc-overwrite", line));
+                }
                 for (i, &b) in new.iter().enumerate() {
-                    let cell = &mut self.mem[at + i];
-                    if *cell & b != b {
-                        let line = format!("{}: program would need a bit 0 -> 1", self.regions.name(at + i));
-                        self.broken.push(line);
-                    }
-                    *cell &= b;
+                    self.mem[at + i] &= b;
+                }
+            }
+            Rule::BitsToZero => {
+                if needs_one {
+                    let line = format!("{}: program would need a bit 0 -> 1", self.regions.name(at));
+                    self.broken.push(("bits-0-to-1", line));
+                }
+                for (i, &b) in new.iter().enumerate() {
+                    self.mem[at + i] &= b;
                 }
             }
             Rule::NotZeroRefused => {
-                if cur.iter().any(|&b| b != 0) {
+                if !cur_zero {
                     return Err(SimError::Refused);
                 }
                 self.mem[at..at + M::UNIT].copy_from_slice(new);
             }
             Rule::Or => {
-                if !erased && new.iter().any(|&b| b != 0) {
-                    let line = format!(
-                        "{}: write over programmed data (undocumented; modelled as OR)",
-                        self.regions.name(at)
-                    );
-                    self.broken.push(line);
+                if !erased && !zeros {
+                    self.broken.push((
+                        "or-overwrite",
+                        format!(
+                            "{}: write over programmed data, the result is the OR of old and new",
+                            self.regions.name(at)
+                        ),
+                    ));
                 }
                 for (i, &b) in new.iter().enumerate() {
                     self.mem[at + i] |= b;
                 }
             }
+            Rule::Overwrite => self.mem[at..at + M::UNIT].copy_from_slice(new),
         }
+        self.programmed[unit] = true;
         Ok(())
     }
 
+    /// Counts the writes of the words in `at..at + len` against `MAX_WRITES` and `BLOCK_WRITES`.
+    fn count_writes(&mut self, at: usize, len: usize) {
+        for word in (at..at + len).step_by(M::WRITE_SIZE) {
+            let w = &mut self.writes[word / M::WRITE_SIZE];
+            *w += 1;
+            if *w as usize == M::MAX_WRITES.saturating_add(1) {
+                let line = format!(
+                    "{}: written {} times since the erase (n_WRITE {})",
+                    self.regions.name(word),
+                    *w,
+                    M::MAX_WRITES
+                );
+                self.broken.push(("nwrite-exceeded", line));
+            }
+            let (block, limit) = M::BLOCK_WRITES;
+            if let Some(index) = word.checked_div(block) {
+                let b = &mut self.block_writes[index];
+                *b += 1;
+                if *b as usize == limit + 1 {
+                    let line = format!(
+                        "{}: block of {block} B written more than {limit} times",
+                        self.regions.name(word)
+                    );
+                    self.broken.push(("block-writes-exceeded", line));
+                }
+            }
+        }
+    }
+
+    /// The physical sectors that make up `from..to`.
+    fn sectors(from: usize, to: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let mut i = 0;
+        while start < to {
+            let size = match M::SECTORS {
+                [] => M::ERASE_SIZE,
+                list => list[i.min(list.len() - 1)],
+            };
+            if start >= from {
+                out.push((start, size));
+            }
+            start += size;
+            i += 1;
+        }
+        out
+    }
+
+    fn clear(&mut self, start: usize, len: usize) {
+        self.torn.retain(|(at, _)| !(start..start + len).contains(at));
+        self.mem[start..start + len].fill(M::ERASED);
+        self.bad[start / M::UNIT..(start + len) / M::UNIT].fill(false);
+        self.programmed[start / M::UNIT..(start + len) / M::UNIT].fill(false);
+        self.poisoned[start / M::UNIT..(start + len) / M::UNIT].fill(false);
+        self.writes[start / M::WRITE_SIZE..(start + len) / M::WRITE_SIZE].fill(0);
+        let block = M::BLOCK_WRITES.0;
+        if let Some(first) = start.checked_div(block) {
+            self.block_writes[first..(start + len).div_ceil(block)].fill(0);
+        }
+    }
+
     fn tear_program(&mut self, at: usize, new: &[u8], rng: &mut Rng) -> &'static str {
+        if M::RULE == Rule::Overwrite {
+            // A line is committed as 32-bit stores: some of them made it.
+            for (i, word) in new.chunks(4).enumerate() {
+                if rng.below(2) == 1 {
+                    self.mem[at + 4 * i..at + 4 * i + word.len()].copy_from_slice(word);
+                }
+            }
+            return "some 32-bit words of the line written";
+        }
         match rng.below(3) {
             0 => "not started",
             v => {
@@ -261,8 +388,8 @@ impl<M: Model> Nor<M> {
         }
     }
 
-    fn tear_erase(&mut self, block: usize, rng: &mut Rng) {
-        for at in (block..block + M::ERASE_SIZE).step_by(M::UNIT) {
+    fn tear_erase(&mut self, block: usize, len: usize, rng: &mut Rng) {
+        for at in (block..block + len).step_by(M::UNIT) {
             match rng.below(4) {
                 0 => {}
                 1 => {
@@ -280,6 +407,9 @@ impl<M: Model> Nor<M> {
                     }
                 }
             }
+            let erased = self.mem[at..at + M::UNIT].iter().all(|&b| b == M::ERASED);
+            self.programmed[at / M::UNIT] &= !erased;
+            self.writes[at / M::WRITE_SIZE..(at + M::UNIT) / M::WRITE_SIZE].fill(0);
         }
     }
 
@@ -338,23 +468,22 @@ impl<M: Model> NorFlash for Nor<M> {
         {
             return Err(self.fail(SimError::Bounds, from));
         }
-        for block in (from..to).step_by(M::ERASE_SIZE) {
+        for (block, len) in Self::sectors(from, to) {
             let n = self.ops;
             let cut = self.start()?;
             let name = self.regions.name(block);
             match cut {
                 None => {
-                    self.mem[block..block + M::ERASE_SIZE].fill(M::ERASED);
-                    self.bad[block / M::UNIT..(block + M::ERASE_SIZE) / M::UNIT].fill(false);
+                    self.clear(block, len);
                     if !self.quiet {
-                        self.log.push(format!("op {n:3}: erase   {name}"));
+                        self.log.push(format!("op {n:3}: erase   {name} ({len} B)"));
                     }
                 }
                 Some(mut rng) => {
-                    self.tear_erase(block, &mut rng);
+                    self.tear_erase(block, len, &mut rng);
                     self.dead = true;
                     self.log
-                        .push(format!("op {n:3}: erase   {name}  <-- POWER CUT, erase torn"));
+                        .push(format!("op {n:3}: erase   {name} ({len} B)  <-- POWER CUT, erase torn"));
                     return Err(self.fail(SimError::PowerCut, block));
                 }
             }
@@ -374,12 +503,33 @@ impl<M: Model> NorFlash for Nor<M> {
         let cut = self.start()?;
         let name = self.regions.name(at);
         let units = bytes.len() / M::UNIT;
+        let (first, last) = (at / M::UNIT, (at + bytes.len()) / M::UNIT);
+        let blank = self.mem[at..at + bytes.len()].iter().all(|&b| b == M::ERASED)
+            && !self.bad[first..last].contains(&true)
+            && !self.programmed[first..last].contains(&true);
+        if cut.is_none() && blank {
+            // Into erased units every family takes any value: no rule to check unit by unit.
+            self.mem[at..at + bytes.len()].copy_from_slice(bytes);
+            self.programmed[first..last].fill(true);
+            self.count_writes(at, bytes.len());
+            if !self.quiet {
+                self.log.push(format!("op {n:3}: program {name} {} bytes", bytes.len()));
+            }
+            return Ok(());
+        }
         let mut cut = cut.map(|mut rng| (rng.below(units), rng));
         for (i, new) in bytes.chunks(M::UNIT).enumerate() {
             let unit_at = at + i * M::UNIT;
             if let Some((_, rng)) = cut.as_mut().filter(|(torn, _)| *torn == i) {
                 let what = self.tear_program(unit_at, new, rng);
-                self.torn = Some((at, bytes.to_vec()));
+                // Units before the cut were programmed, and the one it hit too unless it never started.
+                let done = if what == "not started" {
+                    unit_at
+                } else {
+                    unit_at + M::UNIT
+                };
+                self.count_writes(at, done - at);
+                self.torn.push((at, bytes.to_vec()));
                 self.dead = true;
                 self.log.push(format!(
                     "op {n:3}: program {name} {} bytes {:02X?}  <-- POWER CUT at unit {i}: {what}",
@@ -389,6 +539,7 @@ impl<M: Model> NorFlash for Nor<M> {
                 return Err(self.fail(SimError::PowerCut, unit_at));
             }
             if let Err(e) = self.program_unit(unit_at, new) {
+                self.count_writes(at, unit_at - at);
                 let old = self.mem[unit_at..unit_at + M::UNIT].to_vec();
                 self.log.push(format!(
                     "op {n:3}: program {name} {} bytes {:02X?}  <-- REFUSED by the controller at {} (holds {:02X?})",
@@ -400,6 +551,7 @@ impl<M: Model> NorFlash for Nor<M> {
                 return Err(self.fail(e, unit_at));
             }
         }
+        self.count_writes(at, bytes.len());
         if self.quiet {
         } else if bytes.len() <= 2 * M::UNIT.max(8) {
             self.log.push(format!("op {n:3}: program {name} {:02X?}", bytes));

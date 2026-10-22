@@ -11,7 +11,7 @@ use embassy_embedded_hal::flash::partition::BlockingPartition;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 
-use super::flash::{Model, Nor, Regions, Rng, SimError};
+use super::flash::{Model, Nor, Regions, Rng, Rule, SimError};
 use super::zoo::{self, Expect, Visit};
 
 /// Reads numbers from the input; zeros once it runs out.
@@ -175,6 +175,8 @@ fn image_name(id: u8) -> char {
 
 struct Sim<M: Model> {
     flash: Mutex<NoopRawMutex, RefCell<Nor<M>>>,
+    /// Image contents by id (index id - 1), made on first use.
+    images: RefCell<Vec<Vec<u8>>>,
     layout: Layout,
     page: usize,
     state_at: usize,
@@ -203,8 +205,10 @@ impl<M: Model> Sim<M> {
         for i in 0..layout.active * page {
             nor.mem[active_at + i] = image_byte(1, i);
         }
+        nor.programmed[active_at / M::UNIT..(active_at + layout.active * page) / M::UNIT].fill(true);
         Self {
             flash: Mutex::new(RefCell::new(nor)),
+            images: RefCell::new(Vec::new()),
             layout,
             page,
             state_at,
@@ -220,6 +224,18 @@ impl<M: Model> Sim<M> {
             },
             boots: 0,
         }
+    }
+
+    /// Image `id`, all of ACTIVE's length.
+    fn image(&self, id: u8) -> std::cell::Ref<'_, [u8]> {
+        let len = self.layout.active * self.page;
+        let mut images = self.images.borrow_mut();
+        while images.len() < id as usize {
+            let next = images.len() as u8 + 1;
+            images.push((0..len).map(|i| image_byte(next, i)).collect());
+        }
+        drop(images);
+        std::cell::Ref::map(self.images.borrow(), |images| &images[id as usize - 1][..])
     }
 
     fn nor<R>(&self, f: impl FnOnce(&mut Nor<M>) -> R) -> R {
@@ -255,7 +271,17 @@ impl<M: Model> Sim<M> {
         let last = self.nor(|n| n.last_error);
         let in_state = last.is_some_and(|(_, at)| self.nor(|n| n.regions.contains("STATE", at)));
         let known = match last {
+            Some((SimError::Ecc, at)) if in_state && self.nor(|n| n.poisoned[at / M::UNIT]) => {
+                Some("ecc-overwrite-fault")
+            }
             Some((SimError::Ecc, _)) if in_state => Some("ecc-state-unreadable"),
+            Some((SimError::Refused, at))
+                if in_state
+                    && M::RULE == Rule::ZeroOnce
+                    && self.nor(|n| n.mem[at..at + M::UNIT].iter().all(|&b| b == 0)) =>
+            {
+                Some("zero-over-zero-refused")
+            }
             _ => None,
         };
         let cause = match last {
@@ -271,27 +297,25 @@ impl<M: Model> Sim<M> {
 
     /// Which image page `p` of the partition at `at` holds: "B1", "--" erased, "!!" faulting, "??" neither.
     fn page_name(&self, at: usize) -> String {
-        self.nor(|n| {
-            let mem = &n.mem[at..at + self.page];
+        let page = self.nor(|n| {
             if (at / M::UNIT..(at + self.page) / M::UNIT).any(|u| n.bad[u]) {
-                return "!!".into();
+                return None;
             }
-            if mem.iter().all(|&b| b == M::ERASED) {
-                return "--".into();
-            }
-            for id in 1..self.truth.next {
-                for p in 0..self.layout.active {
-                    if mem
-                        .iter()
-                        .enumerate()
-                        .all(|(i, &b)| b == image_byte(id, p * self.page + i))
-                    {
-                        return format!("{}{p}", image_name(id));
-                    }
+            Some(n.mem[at..at + self.page].to_vec())
+        });
+        let Some(page) = page else { return "!!".into() };
+        if page.iter().all(|&b| b == M::ERASED) {
+            return "--".into();
+        }
+        for id in 1..self.truth.next {
+            let image = self.image(id);
+            for p in 0..self.layout.active {
+                if image[p * self.page..(p + 1) * self.page] == page[..] {
+                    return format!("{}{p}", image_name(id));
                 }
             }
-            "??".into()
-        })
+        }
+        "??".into()
     }
 
     fn pages(&self, at: usize, count: usize) -> Vec<String> {
@@ -355,13 +379,14 @@ impl<M: Model> Sim<M> {
         self.check_boot(state)
     }
 
-    /// The last torn program was a magic other than SWAP into STATE word 0: on byte-wide flash it can read as
-    /// SWAP (0xF0 has every 1 bit of 0xE0, 0xD0 and 0xC0), and the bootloader then swaps in what DFU holds.
+    /// A cut tore a program of a magic other than SWAP into STATE word 0 since STATE was last erased: on byte-wide
+    /// flash it can read as SWAP (0xF0 has every 1 bit of 0xE0, 0xD0 and 0xC0), and the bootloader then swaps in
+    /// what DFU holds.
     fn torn_magic(&self) -> bool {
         self.nor(|n| {
             n.torn
-                .as_ref()
-                .is_some_and(|(at, bytes)| *at == self.state_at && bytes[0] != 0xF0)
+                .iter()
+                .any(|(at, bytes)| *at == self.state_at && bytes[0] != 0xF0)
         })
     }
 
@@ -511,7 +536,7 @@ impl<M: Model> Sim<M> {
                 );
                 let mut result = Ok(());
                 for off in (0..len).step_by(chunk) {
-                    let data: Vec<u8> = (off..off + chunk).map(|i| image_byte(id, i)).collect();
+                    let data = self.image(id)[off..off + chunk].to_vec();
                     result = updater.write_firmware(off, &data);
                     if result.is_err() {
                         break;
@@ -601,11 +626,14 @@ impl<M: Model> Sim<M> {
             });
         }
         let broken = self.nor(|n| n.broken.clone());
-        if !broken.is_empty() {
+        if let Some(&(class, _)) = broken.first() {
+            let lines: Vec<String> = broken.iter().map(|(_, line)| line.clone()).collect();
+            // Breaks the zoo predicts are counted as their class; a bit that would have to go 0 -> 1 is a bug.
+            let known = (broken.iter().all(|(c, _)| *c != "bits-0-to-1")).then_some(class);
             return Err(Failure {
                 invariant: "I7 the family's write rules hold",
-                detail: broken.join("; "),
-                known: None,
+                detail: lines.join("; "),
+                known,
             });
         }
         Ok(())

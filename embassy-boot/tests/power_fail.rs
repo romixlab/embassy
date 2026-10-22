@@ -15,7 +15,7 @@
 //! ```text
 //! cd embassy-boot
 //! cargo test --test power_fail -- --nocapture             # sweep + random run, every model
-//! POWER_FAIL_MODEL=g0 cargo test --test power_fail -- --nocapture         # one model (f1, g0, qspi, l0, l1)
+//! POWER_FAIL_MODEL=g0 cargo test --test power_fail -- --nocapture         # one model, by name
 //! POWER_FAIL_CASES=200000 cargo test --release --test power_fail random   # a longer random run
 //! cargo test --features flash-erase-zero --test power_fail -- --nocapture # the build for 0x00-erased flash
 //! POWER_FAIL_REPLAY=<hex> cargo test --test power_fail replay -- --nocapture
@@ -39,6 +39,16 @@
 //!     state reads `Revert`.
 //!   - `torn-magic-reads-swap`: on byte-wide flash a torn write of another magic can read as SWAP (0xF0 has
 //!     every 1 bit of 0xE0, 0xD0 and 0xC0), and the bootloader swaps in whatever DFU holds.
+//!   - `zero-over-zero-refused`: U5, WBA, L5, U3 (and G4 if zero over zero is refused) refuse the revert
+//!     tail's progress-invalid write when a cut made it run twice; `prepare_boot` then fails at every boot.
+//!   - `ecc-overwrite`: H7 family: clearing the magic programs over a used flash word, which the manual
+//!     calls "not recommended"; `ecc-overwrite-fault`: a cut before the erase that follows leaves it faulting.
+//!   - `nwrite-exceeded`, `block-writes-exceeded`: nRF writes per word (or per 512 B block on the nRF52832)
+//!     between erases beyond the limit.
+//!
+//! Models (`POWER_FAIL_MODEL` takes the name): F1, F4, F7, L0, L0c3, L1, G0, G4, G4zz, C0, U5, L5, H7, H7ab,
+//! Nrf52, Nrf52832, Nrf53net, Rram, Qspi; each cites its reference manual in `power_fail/zoo.rs`, and the
+//! `rules` test checks what each one does with a few writes.
 //!
 //! The model of what a cut leaves is pessimistic (any bit pattern between old and new, ECC faults on half
 //! written units): vendors only say the content is "not guaranteed".
@@ -316,4 +326,104 @@ fn replay() {
     let outcome = run(&unhex(&input));
     println!("{}", outcome.report);
     assert!(outcome.failure.is_none(), "the replayed input fails");
+}
+
+/// What the flash model does on its own, per zoo entry: each probe programs a unit, then programs it again.
+struct Probe;
+
+impl zoo::Visit for Probe {
+    type Out = (&'static str, Vec<String>);
+
+    fn visit<M: flash::Model>(self) -> Self::Out {
+        use embedded_storage::nor_flash::NorFlash;
+        let len = M::UNIT.max(M::WRITE_SIZE);
+        let fresh = || flash::Nor::<M>::new((2 * M::ERASE_SIZE).max(1024), flash::Regions::default());
+        let outcome = |nor: &mut flash::Nor<M>, data: &[u8]| -> String {
+            let broken = nor.broken.len();
+            match nor.write(0, data) {
+                Err(e) => format!("{e:?}"),
+                Ok(()) if nor.broken.len() > broken => nor.broken[broken].0.to_string(),
+                Ok(()) if nor.bad[0] => "Ecc".into(),
+                Ok(()) => "ok".into(),
+            }
+        };
+        let twice = |first: u8, second: u8| {
+            let mut nor = fresh();
+            let _ = nor.write(0, &vec![first; len]);
+            outcome(&mut nor, &vec![second; len])
+        };
+        let mut out = vec![
+            format!("zeros over F0: {}", twice(0xF0, 0)),
+            format!("zeros over zeros: {}", twice(0, 0)),
+            format!("C0 over F0: {}", twice(0xF0, 0xC0)),
+            format!("zeros over FF: {}", twice(0xFF, 0)),
+        ];
+        let mut nor = fresh();
+        let _ = nor.write(0, &vec![0xF0; len]);
+        let _ = nor.write(0, &vec![0; len]);
+        out.push(format!("third write: {}", outcome(&mut nor, &vec![0; len])));
+        let mut nor = fresh();
+        let block: Vec<u8> = vec![0; 512.max(len)];
+        let _ = nor.write(0, &block);
+        out.push(format!("512 B written twice: {}", outcome(&mut nor, &block)));
+        let mut nor = fresh();
+        let before = nor.ops;
+        nor.erase(0, M::ERASE_SIZE as u32).unwrap();
+        out.push(format!("erases in one erase: {}", nor.ops - before));
+        (M::NAME, out)
+    }
+}
+
+#[test]
+fn rules() {
+    #[rustfmt::skip]
+    let want: &[(&str, [&str; 7])] = &[
+        // zeros/F0, zeros/zeros, C0/F0, zeros/FF, third write, 512 B twice, physical erases
+        ("F1",       ["ok", "ok", "Refused", "ok", "ok", "ok", "1"]),
+        ("G0",       ["ok", "ok", "Refused", "Refused", "ok", "ok", "1"]),
+        ("Qspi",     ["ok", "ok", "ok", "ok", "ok", "ok", "1"]),
+        ("L0",       ["Refused", "ok", "Refused", "Refused", "Refused", "ok", "1"]),
+        ("L1",       ["ok", "ok", "or-overwrite", "ok", "ok", "ok", "1"]),
+        ("F4",       ["ok", "ok", "ok", "ok", "ok", "ok", "5"]),
+        ("F7",       ["ok", "ok", "ok", "ok", "ok", "ok", "5"]),
+        ("L0c3",     ["ok", "ok", "or-overwrite", "ok", "ok", "ok", "1"]),
+        ("G4",       ["ok", "ok", "Refused", "ok", "ok", "ok", "1"]),
+        ("G4zz",     ["ok", "Refused", "Refused", "ok", "Refused", "Refused", "1"]),
+        ("C0",       ["ok", "ok", "Refused", "ok", "ok", "ok", "1"]),
+        ("U5",       ["ok", "Refused", "Refused", "ok", "Refused", "Refused", "1"]),
+        ("L5",       ["ok", "Refused", "Refused", "ok", "Refused", "Refused", "1"]),
+        ("H7",       ["ecc-overwrite", "ok", "ecc-overwrite", "ok", "Ecc", "ok", "1"]),
+        ("H7ab",     ["ecc-overwrite", "ok", "ecc-overwrite", "ok", "Ecc", "ok", "1"]),
+        ("Nrf52",    ["ok", "ok", "ok", "ok", "nwrite-exceeded", "ok", "1"]),
+        ("Nrf52832", ["ok", "ok", "ok", "ok", "ok", "block-writes-exceeded", "1"]),
+        ("Nrf53net", ["ok", "ok", "ok", "ok", "nwrite-exceeded", "ok", "1"]),
+        ("Rram",     ["ok", "ok", "ok", "ok", "ok", "ok", "1"]),
+    ];
+    assert_eq!(want.len(), zoo::COUNT, "a zoo entry without a rule test");
+    let mut wrong = Vec::new();
+    for i in 0..zoo::COUNT {
+        let (name, got) = zoo::with_model(i, Probe);
+        let row = want
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("no rule test for {name}"));
+        for (line, want) in got.iter().zip(row.1) {
+            if !line.ends_with(&format!(": {want}")) {
+                wrong.push(format!("{name}: {line}, want {want}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "rule tests:\n{}", wrong.join("\n"));
+}
+
+/// Two cuts in a row, each right after the revert tail's progress-invalid write: the third write of that word
+/// is beyond nRF52's n_WRITE = 2. The random run seldom puts two cuts in the same window, so it is kept here.
+#[test]
+fn nrf52_two_cuts_exceed_n_write() {
+    if zoo::expect("Nrf52", 0xFF) == Expect::Skip {
+        return;
+    }
+    let outcome = run(&unhex("0f010000010528000000000102020501000002"));
+    let known = outcome.failure.as_ref().and_then(|f| f.known);
+    assert_eq!(known, Some("nwrite-exceeded"), "{}", outcome.report);
 }
