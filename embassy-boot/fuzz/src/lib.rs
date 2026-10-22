@@ -61,16 +61,8 @@ fn state() -> &'static Mutex<(KnownCrash, Counts)> {
     STATE.get_or_init(|| Mutex::new((KnownCrash::from_env(), Counts::default())))
 }
 
-/// Longest input run. The simulator names an image with the letter `'A' + id - 1` (`image_name`) and reads it back
-/// from the first byte of the page name (`active_image`), which is only one byte up to 62 downloads; a download is
-/// two bytes. The fuzzer found that as a bogus "ACTIVE is [0 1]" on an input of 100 downloads.
-pub const MAX_LEN: usize = 120;
-
 /// Runs one input; panics with the report on a failure that is not a known class.
 pub fn check(data: &[u8]) {
-    if data.len() > MAX_LEN {
-        return;
-    }
     let outcome = scenario::run(data);
     // A model that is not a configuration anyone builds in this build (erase value vs `flash-erase-zero`).
     if outcome.expect == Expect::Skip {

@@ -169,8 +169,19 @@ fn image_byte(id: u8, offset: usize) -> u8 {
     Rng(((id as u64) << 32) ^ offset as u64).next() as u8
 }
 
+/// The letter that names image `id` in page names: A-Z, a-z, then the letters from U+00C0 on, one `char` each for
+/// every id up to 255 (`active_image` reads it back with `image_id`).
 fn image_name(id: u8) -> char {
-    (b'A' + id - 1) as char
+    match id {
+        1..=26 => (b'A' + id - 1) as char,
+        27..=52 => (b'a' + id - 27) as char,
+        _ => char::from_u32(0xC0 + id as u32 - 53).expect("a letter"),
+    }
+}
+
+/// The id an `image_name` letter stands for.
+fn image_id(name: char) -> Option<u8> {
+    (1..=u8::MAX).find(|&id| image_name(id) == name)
 }
 
 struct Sim<M: Model> {
@@ -335,8 +346,7 @@ impl<M: Model> Sim<M> {
     /// The image ACTIVE holds whole, if any.
     fn active_image(&self) -> Option<u8> {
         let pages = self.pages(self.active_at, self.layout.active);
-        let first = pages[0].as_bytes();
-        let id = first[0].checked_sub(b'A')? + 1;
+        let id = image_id(pages[0].chars().next()?)?;
         let whole = pages
             .iter()
             .enumerate()
@@ -516,8 +526,12 @@ impl<M: Model> Sim<M> {
                 if t.trial || t.staged != Tri::No {
                     return Ok(());
                 }
+                // Image ids are a byte: a run with more downloads than that is not extended.
+                let Some(next) = self.truth.next.checked_add(1) else {
+                    return Ok(());
+                };
                 let id = self.truth.next;
-                self.truth.next += 1;
+                self.truth.next = next;
                 self.truth.b = None;
                 let len = self.layout.active * self.page;
                 let sizes = [self.page, self.page / 2, self.page / 4, M::WRITE_SIZE * 4];

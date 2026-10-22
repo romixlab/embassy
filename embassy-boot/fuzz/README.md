@@ -28,12 +28,12 @@ cargo run --bin seeds
 Fuzz for five minutes (`-s none`: no AddressSanitizer, the code has no `unsafe` and it runs about 1.5 times faster):
 
 ```sh
-cargo fuzz run -s none power_fail -- -max_total_time=300 -dict=power_fail.dict
+cargo fuzz run -s none power_fail -- -max_total_time=300 -max_len=128 -dict=power_fail.dict
 ```
 
 A run on main prints only lines like `known class ecc-overwrite on H7: 64 runs (of 1902); example 0d01...` (the first example of each class and then every power of two). It stops on the first input that breaks an invariant, no known class explains, or that is of a class asked for below.
 
-- `-jobs=4 -workers=4` runs four processes on the same corpus; `-max_len=64` keeps inputs short (the useful ones are under 40 bytes); inputs over 120 bytes are skipped (the simulator names an image by a letter from the number of downloads and breaks after 62 of them: a bogus "ACTIVE is [0 1]", found by the fuzzer, in `scenario.rs`' `image_name` and `active_image`).
+- `-jobs=4 -workers=4` runs four processes on the same corpus; `-max_len=128` (in the command above) keeps inputs short for speed, the useful ones are under 40 bytes; it is a libFuzzer option, nothing is filtered in `check`.
 - `power_fail.dict` has the step bytes (download, mark_updated, boot, mark_booted, mark_dfu, cut) and a few sequences.
 - Known classes as crashes: `POWER_FAIL_KNOWN_CRASH=all` (every class), or a list of `class` or `class:Model`, e.g. `POWER_FAIL_KNOWN_CRASH=nwrite-exceeded:Nrf52,torn-magic-reads-swap:Qspi`. Use it to find a class again, or to check how fast the fuzzer reaches it.
 - Flash that erases to 0x00: `cargo fuzz run -s none --features flash-erase-zero power_fail` (runs only the L0, L0c3 and L1 models, like the test's feature of the same name).

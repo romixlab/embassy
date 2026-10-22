@@ -427,3 +427,19 @@ fn nrf52_two_cuts_exceed_n_write() {
     let known = outcome.failure.as_ref().and_then(|f| f.known);
     assert_eq!(known, Some("nwrite-exceeded"), "{}", outcome.report);
 }
+
+/// More downloads than one letter of ASCII can name: the image names ran out of one-byte letters and ACTIVE
+/// read as not one whole image (found by the fuzzer, `fuzz/README.md`).
+#[test]
+fn many_downloads_keep_image_names() {
+    let mut steps = vec![Step::Download { chunk: 0 }; 150];
+    steps.extend([Step::MarkUpdated, Step::Boot, Step::MarkBooted, Step::Boot]);
+    for m in 0..zoo::COUNT {
+        let (name, erased) = model(m);
+        if zoo::expect(name, erased) != Expect::Pass {
+            continue;
+        }
+        let outcome = run(&input(m, Layout::encode(1, 0, 0, 1), &steps));
+        assert!(outcome.failure.as_ref().is_none_or(|f| f.known.is_some()), "{}", outcome.report);
+    }
+}
