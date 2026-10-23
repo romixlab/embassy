@@ -48,7 +48,7 @@ Make it small:
 cargo fuzz tmin -s none power_fail artifacts/power_fail/crash-<hash>
 ```
 
-Turn a file into the hex string the test takes (in `embassy-boot`):
+Turn a file into the hex string the test takes (in `embassy-boot/fuzz`, where `artifacts/` is):
 
 ```sh
 od -An -tx1 -v artifacts/power_fail/minimized-from-<hash> | tr -d ' \n'
@@ -71,4 +71,4 @@ fn found_by_the_fuzzer() {
 
 ## Why not AFL++
 
-`cargo-afl` was tried: the same `check` function is a one-line target. It does not build on this PC (Arch, LLVM 23): AFL++ 4.40c's LLVM mode stops at "llvm_mode only supports llvm ... your version is too new". It is not shipped, because it was not run.
+`cargo-afl` was tried: the same `check` function is a one-line target. It does not build with LLVM 23 (tried on Arch Linux): AFL++ 4.40c's LLVM mode stops at "llvm_mode only supports llvm ... your version is too new". It is left out until it builds and has been run.
