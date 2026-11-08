@@ -80,7 +80,7 @@ pub struct Pll {
     /// PLL multiplication factor.
     pub mul: PllMul,
 
-    #[cfg(any(stm32h743, stm32h730, stm32h753))]
+    #[cfg(stm32h7)]
     /// PLL Fractional multiplier.
     pub fracn: Option<u16>,
 
@@ -980,14 +980,13 @@ fn init_pll(num: usize, config: Pll, input: &PllInput) -> PllOutput {
     // be chosen when the reference clock frequency is lower than 2 MHz.
     let wide_allowed = ref_range != Pllrge::Range1;
 
-    #[cfg(any(stm32h743, stm32h730, stm32h753))]
+    #[cfg(stm32h7)]
     let vco_clk = match config.fracn {
-        Some(fracn) => {
-            Hertz::hz((ref_clk.0 as f32 * ((config.mul.to_bits() + 1) as f32 + (fracn as f32 / 8192.0))) as u32)
-        }
+        // ref_clk * (DIVN + FRACN / 2^13), in integers: f32 has 24 bits of mantissa, too few for a VCO in Hz
+        Some(fracn) => Hertz::hz((ref_clk * config.mul).0 + ((ref_clk.0 as u64 * fracn as u64) >> 13) as u32),
         None => ref_clk * config.mul,
     };
-    #[cfg(not(any(stm32h743, stm32h730, stm32h753)))]
+    #[cfg(not(stm32h7))]
     let vco_clk = ref_clk * config.mul;
 
     let vco_range = if VCO_RANGE.contains(&vco_clk) {
@@ -1036,7 +1035,7 @@ fn init_pll(num: usize, config: Pll, input: &PllInput) -> PllOutput {
             w.set_pllsrc(config.source);
         });
 
-        #[cfg(any(stm32h743, stm32h730, stm32h753))]
+        #[cfg(stm32h7)]
         if let Some(fracn) = config.fracn {
             RCC.pllfracr(num).modify(|w| w.set_fracn(fracn))
         }
@@ -1045,14 +1044,14 @@ fn init_pll(num: usize, config: Pll, input: &PllInput) -> PllOutput {
             w.set_pllvcosel(num, vco_range);
             w.set_pllrge(num, ref_range);
 
-            #[cfg(any(stm32h743, stm32h730, stm32h753))]
+            #[cfg(stm32h7)]
             if config.fracn.is_some() {
                 w.set_pllfracen(num, true);
             } else {
                 w.set_pllfracen(num, false);
             }
 
-            #[cfg(not(any(stm32h743, stm32h730, stm32h753)))]
+            #[cfg(not(stm32h7))]
             w.set_pllfracen(num, false);
 
             w.set_divpen(num, p.is_some());

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased - ReleaseDate
 
 RCC:
+- feat: stm32/rcc h7: `Pll::fracn` on every STM32H7 (it was on H743 / H730 / H753 only; all H7 PLLs have FRACN), and the VCO frequency in integer math instead of f32.
 - fix: stm32/rcc g0: enable the flash prefetch after setting the latency; with 2 wait states at 64 MHz and prefetch off code ran 8-16% slower.
 
 Time driver:
