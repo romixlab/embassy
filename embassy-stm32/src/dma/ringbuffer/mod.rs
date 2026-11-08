@@ -260,9 +260,7 @@ impl<'a, W: Word> ReadableDmaRingBuffer<'a, W> {
         let write_snapshot = self.write_index;
 
         // Copy data starting skip words ahead of current read_index.
-        for i in 0..readable {
-            buf[i] = self.read_buf(skip + i);
-        }
+        self.copy_out(skip, &mut buf[..readable]);
 
         // Commit both the alignment skip and the read in one advance, so
         // read_index is never in a partially-advanced state on error.
@@ -327,9 +325,7 @@ impl<'a, W: Word> ReadableDmaRingBuffer<'a, W> {
             self.read_index.advance(self.cap(), front_skip);
         }
 
-        for i in 0..to_read {
-            buf[i] = self.read_buf(i);
-        }
+        self.copy_out(0, &mut buf[..to_read]);
 
         // Advance past what we read. Trailing partial frame is left in the buffer.
         self.read_index.advance(self.cap(), to_read);
@@ -337,8 +333,21 @@ impl<'a, W: Word> ReadableDmaRingBuffer<'a, W> {
         to_read
     }
 
-    fn read_buf(&self, offset: usize) -> W {
-        unsafe { core::ptr::read_volatile(self.dma_buf.as_ptr().add(self.read_index.as_index(self.cap(), offset))) }
+    /// Copy `buf.len()` (at most `cap`) elements, starting `offset` elements after the read index, into `buf`.
+    ///
+    /// The start is wrapped once and the rest copied as up to two contiguous runs: wrapping every element with `%`
+    /// costs a software division per element on cores without a divider (Cortex-M0/M0+).
+    fn copy_out(&self, offset: usize, buf: &mut [W]) {
+        let start = self.read_index.as_index(self.cap(), offset);
+        let first = buf.len().min(self.cap() - start);
+        let (head, tail) = buf.split_at_mut(first);
+        let src = self.dma_buf.as_ptr();
+        for (i, w) in head.iter_mut().enumerate() {
+            *w = unsafe { core::ptr::read_volatile(src.add(start + i)) };
+        }
+        for (i, w) in tail.iter_mut().enumerate() {
+            *w = unsafe { core::ptr::read_volatile(src.add(i)) };
+        }
     }
 }
 
