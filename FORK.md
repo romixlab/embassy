@@ -21,4 +21,4 @@ Our fork of [embassy-rs/embassy](https://github.com/embassy-rs/embassy): upstrea
 - **A new fix:** branch `t/<slug>` from the upstream commit `main` is on, commit, merge it into `main` with `--no-ff`, add a row above.
 - **A newer upstream:** merge upstream `main` (or a release tag) into `main`, never rebase. When upstream merged a topic, its row goes, and the branch stays.
 - **Changing a topic:** a new commit on its branch, merged into `main` again.
-- **Downstream:** `[patch.crates-io]` with `git = "https://github.com/romixlab/embassy", branch = "main"` for every embassy crate the firmware uses. `Cargo.lock` pins the rev, and `cargo update -p embassy-stm32` moves it.
+- **Downstream:** `[patch.crates-io]` with a plain `git = "https://github.com/romixlab/embassy"` (no branch, tag or rev: `main` is the default branch) for every embassy crate the firmware uses. `Cargo.lock` holds the rev, and `cargo update -p embassy-stm32` (or `-p embassy-rp`) moves it.
