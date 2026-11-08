@@ -396,12 +396,12 @@ mod btable {
 }
 
 /// USB erratum "Buffer description table update completes after CTR interrupt triggers"
-/// (STM32H523/533: ES0621 Rev 3 §2.19.1; STM32U3: ES0626 §2.18.1): the CTR interrupt of an OUT
-/// transaction fires slightly before the peripheral has finished writing the packet and its byte
-/// count to USB SRAM. Software must wait 800 ns before reading either (6.4 μs at low speed, which
-/// this device-mode driver does not use).
+/// (STM32H523/533: ES0621 Rev 3 §2.19.1; STM32U3: ES0626 §2.18.1; STM32G0B1: ES0548 Rev 4 §2.16.1;
+/// STM32G0C1: ES0549 Rev 4 §2.17.1): the CTR interrupt of an OUT transaction fires slightly before
+/// the peripheral has finished writing the packet and its byte count to USB SRAM. Software must wait
+/// 800 ns before reading either (6.4 μs at low speed, which this device-mode driver does not use).
 fn wait_for_out_packet_memory() {
-    #[cfg(any(stm32h5, stm32u3))]
+    #[cfg(any(stm32h5, stm32u3, stm32g0b1, stm32g0c1))]
     crate::wait::block_for_us(1);
 }
 
