@@ -15,6 +15,10 @@ Our fork of [embassy-rs/embassy](https://github.com/embassy-rs/embassy): upstrea
 | `t/dma-ring-copy` | stm32/dma: the ring buffer copies out in up to two runs, no division per element (the header UART of Donguru at 5.8 Mbaud on the M0+) | not offered |
 | `t/h7-fracn` | stm32/rcc h7: `Pll::fracn` on every STM32H7, VCO in integers (B135) | not offered |
 | `t/tim-psc-round` | stm32/time-driver: TIM prescaler rounded to the nearest tick (a fractional PLL ran embassy-time 0.39 % fast) | not offered |
+| `t/usb-ctr-sram-wait` | stm32/usb: the 800 ns wait after an OUT CTR on STM32G0B1 and G0C1 too (ES0548 2.16.1, ES0549 2.17.1) | not offered |
+| `t/boot-fuzz` | embassy-boot: power-fail test on simulated flash of 19 MCU families, libFuzzer target, CI job (the commits of `boot-fuzz-pr` on this base) | embassy-rs/embassy#7356, open |
+
+Not merged: `donguru-0.6-double-buffer` (a backport onto 0.6.0, upstream has the feature since #7275), and `sdmmc_h7` and `stm32h7rs_usb_hs` (debug experiments from 2023 and 2024).
 
 ## Working on it
 
